@@ -25,35 +25,10 @@ WEEKLY_TOPICS = [
     "DAOs will replace traditional corporations within 20 years",
     "Privacy coins should be legal in all countries",
     "NFTs have real long-term utility beyond speculation",
-    "The metaverse will become mainstream before 2030",
     "Proof of Stake is more secure than Proof of Work",
     "Open source AI models are safer than closed source ones",
+    "The metaverse will become mainstream before 2030",
 ]
-
-
-@allow_storage
-@dataclass
-class Player:
-    address: str
-    team: str        # "A" or "B"
-    argument: str
-    submitted: bool
-    xp: u256
-
-
-@allow_storage
-@dataclass
-class Room:
-    id: str
-    host: str
-    topic: str
-    time_limit: u256
-    status: str      # "waiting" | "arguing" | "judging" | "finished"
-    winner_team: str
-    score_team_a: u256
-    score_team_b: u256
-    reasoning: str
-    player_count: u256
 
 
 class DebateBattle(gl.Contract):
@@ -61,9 +36,14 @@ class DebateBattle(gl.Contract):
     # ── State ──────────────────────────────────────────────
     owner: str
     room_counter: u256
-    rooms: DynArray[Room]
-    players: DynArray[Player]
-    room_player_log: DynArray[str]   # "room_id:player_address" flat list
+
+    # Room data stored as flat strings "field:value"
+    # room_{id}_host, room_{id}_topic, room_{id}_status,
+    # room_{id}_score_a, room_{id}_score_b, room_{id}_reasoning
+    room_data: DynArray[str]
+
+    # Player data: "room_id:address:team:submitted:argument:xp"
+    player_log: DynArray[str]
 
     # ── Constructor ────────────────────────────────────────
     def __init__(self, owner_address: str):
@@ -84,36 +64,39 @@ class DebateBattle(gl.Contract):
         return self.room_counter
 
     @gl.public.view
-    def get_room(self, room_id: str) -> str:
-        for i in range(len(self.rooms)):
-            r = self.rooms[i]
-            if r.id == room_id:
-                return (
-                    f"Room: {r.id} | "
-                    f"Topic: {r.topic} | "
-                    f"Status: {r.status} | "
-                    f"Players: {int(r.player_count)} | "
-                    f"Winner: {r.winner_team} | "
-                    f"Score A: {int(r.score_team_a)} | "
-                    f"Score B: {int(r.score_team_b)} | "
-                    f"Reasoning: {r.reasoning}"
-                )
-        return "Room not found"
+    def get_room_status(self, room_id: str) -> str:
+        status = self._get_room_field(room_id, "status")
+        topic = self._get_room_field(room_id, "topic")
+        winner = self._get_room_field(room_id, "winner")
+        score_a = self._get_room_field(room_id, "score_a")
+        score_b = self._get_room_field(room_id, "score_b")
+        reasoning = self._get_room_field(room_id, "reasoning")
+        if not status:
+            return "Room not found"
+        return (
+            f"Room: {room_id} | Status: {status} | Topic: {topic} | "
+            f"Winner: {winner} | Score A: {score_a} | Score B: {score_b} | "
+            f"Reasoning: {reasoning}"
+        )
 
     @gl.public.view
-    def get_player_xp(self, player_address: str) -> u256:
-        for i in range(len(self.players)):
-            p = self.players[i]
-            if p.address == player_address:
-                return p.xp
-        return u256(0)
+    def get_player_xp(self, player_address: str) -> str:
+        total_xp = 0
+        for i in range(len(self.player_log)):
+            entry = self.player_log[i]
+            parts = entry.split(":")
+            if len(parts) >= 6 and parts[1] == player_address:
+                try:
+                    total_xp += int(parts[5])
+                except Exception:
+                    pass
+        return f"Player {player_address[:8]}... XP: {total_xp}"
 
     @gl.public.view
     def get_game_summary(self) -> str:
         return (
-            f"=== Debate Battle DAO ===\n"
+            f"=== Debate Battle ===\n"
             f"Total Rooms: {int(self.room_counter)}\n"
-            f"Total Players: {len(self.players)}\n"
             f"Current Topic: {self.get_weekly_topic()}"
         )
 
@@ -126,23 +109,19 @@ class DebateBattle(gl.Contract):
         assert int(time_limit_minutes) in [5, 10, 15], "Time limit must be 5, 10, or 15"
 
         caller = str(gl.message.sender_address)
-        room_id = self._generate_room_code()
+        room_id = f"ROOM{int(self.room_counter)}"
         index = int(self.room_counter) % len(WEEKLY_TOPICS)
         topic = WEEKLY_TOPICS[index]
 
-        room = Room(
-            id=room_id,
-            host=caller,
-            topic=topic,
-            time_limit=time_limit_minutes,
-            status="waiting",
-            winner_team="",
-            score_team_a=u256(0),
-            score_team_b=u256(0),
-            reasoning="",
-            player_count=u256(0),
-        )
-        self.rooms.append(room)
+        self._set_room_field(room_id, "host", caller)
+        self._set_room_field(room_id, "topic", topic)
+        self._set_room_field(room_id, "status", "waiting")
+        self._set_room_field(room_id, "time_limit", str(int(time_limit_minutes)))
+        self._set_room_field(room_id, "winner", "")
+        self._set_room_field(room_id, "score_a", "0")
+        self._set_room_field(room_id, "score_b", "0")
+        self._set_room_field(room_id, "reasoning", "")
+
         self.room_counter = u256(int(self.room_counter) + 1)
         return f"Room {room_id} created! Topic: {topic}"
 
@@ -153,33 +132,19 @@ class DebateBattle(gl.Contract):
     @gl.public.write
     def join_room(self, room_id: str) -> str:
         caller = str(gl.message.sender_address)
-        room_idx = self._find_room(room_id)
-        assert room_idx >= 0, "Room not found"
-
-        r = self.rooms[room_idx]
-        assert r.status == "waiting", "Room is not accepting players"
-        assert int(r.player_count) < 8, "Room is full (max 8 players)"
+        status = self._get_room_field(room_id, "status")
+        assert status == "waiting", "Room not found or not accepting players"
         assert not self._player_in_room(room_id, caller), "Already joined"
 
-        # Assign team for balance
         team_a = self._count_team(room_id, "A")
         team_b = self._count_team(room_id, "B")
         team = "A" if team_a <= team_b else "B"
 
-        player = Player(
-            address=caller,
-            team=team,
-            argument="",
-            submitted=False,
-            xp=u256(0),
-        )
-        self.players.append(player)
-        self.room_player_log.append(f"{room_id}:{caller}")
+        # "room_id:address:team:submitted:argument:xp"
+        self.player_log.append(f"{room_id}:{caller}:{team}:false::0")
 
-        r.player_count = u256(int(r.player_count) + 1)
-        self.rooms[room_idx] = r
-
-        return f"Joined room {room_id} on Team {team}! Topic: {r.topic}"
+        topic = self._get_room_field(room_id, "topic")
+        return f"Joined {room_id} on Team {team}! Topic: {topic}"
 
     # ══════════════════════════════════════════════════════
     #  START DEBATE
@@ -188,18 +153,15 @@ class DebateBattle(gl.Contract):
     @gl.public.write
     def start_debate(self, room_id: str) -> str:
         caller = str(gl.message.sender_address)
-        room_idx = self._find_room(room_id)
-        assert room_idx >= 0, "Room not found"
+        host = self._get_room_field(room_id, "host")
+        assert caller == host, "Only the host can start"
+        assert self._get_room_field(room_id, "status") == "waiting", "Already started"
+        assert self._count_team(room_id, "A") >= 1 or self._count_team(room_id, "B") >= 1, "Need at least 1 player"
 
-        r = self.rooms[room_idx]
-        assert caller == r.host, "Only the host can start"
-        assert r.status == "waiting", "Debate already started"
-        assert self._count_team(room_id, "A") >= 1, "Need at least 1 player on Team A"
-        assert self._count_team(room_id, "B") >= 1, "Need at least 1 player on Team B"
-
-        r.status = "arguing"
-        self.rooms[room_idx] = r
-        return f"Debate started! Topic: {r.topic}. You have {int(r.time_limit)} minutes!"
+        self._set_room_field(room_id, "status", "arguing")
+        topic = self._get_room_field(room_id, "topic")
+        time_limit = self._get_room_field(room_id, "time_limit")
+        return f"Debate started! Topic: {topic}. You have {time_limit} minutes!"
 
     # ══════════════════════════════════════════════════════
     #  SUBMIT ARGUMENT
@@ -208,64 +170,49 @@ class DebateBattle(gl.Contract):
     @gl.public.write
     def submit_argument(self, room_id: str, argument: str) -> str:
         caller = str(gl.message.sender_address)
-        room_idx = self._find_room(room_id)
-        assert room_idx >= 0, "Room not found"
-
-        r = self.rooms[room_idx]
-        assert r.status == "arguing", "Debate not in arguing phase"
+        assert self._get_room_field(room_id, "status") == "arguing", "Not in arguing phase"
         assert self._player_in_room(room_id, caller), "You are not in this room"
         assert 10 <= len(argument) <= 500, "Argument must be 10-500 characters"
 
-        # Update player argument
-        for i in range(len(self.players)):
-            p = self.players[i]
-            key = f"{room_id}:{p.address}"
-            if p.address == caller and self._key_in_log(key):
-                assert not p.submitted, "Already submitted"
-                p.argument = argument
-                p.submitted = True
-                self.players[i] = p
-                break
-
-        return f"Argument submitted for room {room_id}!"
+        for i in range(len(self.player_log)):
+            entry = self.player_log[i]
+            parts = entry.split(":")
+            if len(parts) >= 6 and parts[0] == room_id and parts[1] == caller:
+                assert parts[3] == "false", "Already submitted"
+                # "room_id:address:team:submitted:argument:xp"
+                safe_arg = argument.replace(":", "-")
+                self.player_log[i] = f"{room_id}:{caller}:{parts[2]}:true:{safe_arg}:{parts[5]}"
+                return f"Argument submitted for {room_id}!"
+        return "Player not found"
 
     # ══════════════════════════════════════════════════════
-    #  JUDGE DEBATE — uses Equivalence Principle ✅
+    #  JUDGE DEBATE — Equivalence Principle ✅
     # ══════════════════════════════════════════════════════
 
     @gl.public.write
     def judge_debate(self, room_id: str) -> str:
-        caller = str(gl.message.sender_address)
-        room_idx = self._find_room(room_id)
-        assert room_idx >= 0, "Room not found"
+        assert self._get_room_field(room_id, "status") == "arguing", "Not in arguing phase"
 
-        r = self.rooms[room_idx]
-        assert r.status == "arguing", "Debate not in arguing phase"
+        topic = self._get_room_field(room_id, "topic")
 
-        topic = r.topic
-
-        # Collect arguments per team
         team_a_args = []
         team_b_args = []
-        for i in range(len(self.players)):
-            p = self.players[i]
-            key = f"{room_id}:{p.address}"
-            if self._key_in_log(key) and p.submitted and p.argument:
-                entry = f"Player {p.address[:8]}...: {p.argument}"
-                if p.team == "A":
-                    team_a_args.append(entry)
+        for i in range(len(self.player_log)):
+            entry = self.player_log[i]
+            parts = entry.split(":")
+            if len(parts) >= 6 and parts[0] == room_id and parts[3] == "true" and parts[4]:
+                entry_text = f"Player {parts[1][:8]}...: {parts[4]}"
+                if parts[2] == "A":
+                    team_a_args.append(entry_text)
                 else:
-                    team_b_args.append(entry)
+                    team_b_args.append(entry_text)
 
-        assert len(team_a_args) > 0 or len(team_b_args) > 0, "No arguments submitted"
+        assert len(team_a_args) > 0 or len(team_b_args) > 0, "No arguments submitted yet"
 
         team_a_text = "\n".join(team_a_args) if team_a_args else "No arguments submitted"
         team_b_text = "\n".join(team_b_args) if team_b_args else "No arguments submitted"
 
-        # ── Equivalence Principle: leader + validator ✅ ──
-
         def leader_fn():
-            # Fetch web context for the topic
             search_url = f"https://en.wikipedia.org/wiki/{topic.replace(' ', '_')}"
             try:
                 response = gl.nondet.web.get(search_url)
@@ -273,26 +220,20 @@ class DebateBattle(gl.Contract):
             except Exception:
                 web_context = "No additional context available."
 
-            prompt = f"""You are an impartial debate judge for a community game on GenLayer blockchain.
+            prompt = f"""You are an impartial debate judge for a GenLayer community game.
 
 DEBATE TOPIC: "{topic}"
 
 BACKGROUND CONTEXT:
 {web_context}
 
-TEAM A ARGUMENTS (arguing FOR the topic):
+TEAM A ARGUMENTS (FOR the topic):
 {team_a_text}
 
-TEAM B ARGUMENTS (arguing AGAINST the topic):
+TEAM B ARGUMENTS (AGAINST the topic):
 {team_b_text}
 
-JUDGING CRITERIA:
-1. Logical coherence
-2. Use of evidence or examples
-3. Persuasiveness
-4. Relevance to the topic
-
-Respond ONLY with a JSON object:
+Evaluate both teams and respond ONLY with a JSON object:
 {{
   "winner_team": "A",
   "score_team_a": 75,
@@ -303,24 +244,20 @@ Respond ONLY with a JSON object:
 Rules:
 - winner_team: exactly "A" or "B"
 - scores: integers 0-100
-- reasoning: two sentences max
 - If a team has no arguments, the other team wins automatically
 No extra text."""
 
             result = gl.nondet.exec_prompt(prompt)
             clean = result.strip().replace("```json", "").replace("```", "").strip()
             data = json.loads(clean)
-
             winner = data.get("winner_team", "A")
             score_a = int(data.get("score_team_a", 50))
             score_b = int(data.get("score_team_b", 50))
             reasoning = data.get("reasoning", "")
-
             if winner not in ("A", "B"):
                 winner = "A"
             score_a = max(0, min(100, score_a))
             score_b = max(0, min(100, score_b))
-
             return json.dumps({
                 "winner_team": winner,
                 "score_team_a": score_a,
@@ -330,8 +267,8 @@ No extra text."""
 
         def validator_fn(leader_result) -> bool:
             """
-            Validators independently judge the debate.
-            Equivalent if: same winner_team + scores within ±10 ✅
+            Winner must match exactly.
+            Scores within ±10 points. ✅
             """
             if not isinstance(leader_result, gl.vm.Return):
                 return False
@@ -339,11 +276,8 @@ No extra text."""
                 validator_raw = leader_fn()
                 leader_data = json.loads(leader_result.calldata)
                 validator_data = json.loads(validator_raw)
-
-                # Winner must match exactly
                 if leader_data["winner_team"] != validator_data["winner_team"]:
                     return False
-                # Scores within ±10 points
                 if abs(leader_data["score_team_a"] - validator_data["score_team_a"]) > 10:
                     return False
                 if abs(leader_data["score_team_b"] - validator_data["score_team_b"]) > 10:
@@ -360,24 +294,23 @@ No extra text."""
         score_b = data["score_team_b"]
         reasoning = data["reasoning"]
 
-        # Update room
-        r.status = "finished"
-        r.winner_team = winner
-        r.score_team_a = u256(score_a)
-        r.score_team_b = u256(score_b)
-        r.reasoning = reasoning
-        self.rooms[room_idx] = r
+        self._set_room_field(room_id, "status", "finished")
+        self._set_room_field(room_id, "winner", winner)
+        self._set_room_field(room_id, "score_a", str(score_a))
+        self._set_room_field(room_id, "score_b", str(score_b))
+        self._set_room_field(room_id, "reasoning", reasoning)
 
         # Award XP
-        for i in range(len(self.players)):
-            p = self.players[i]
-            key = f"{room_id}:{p.address}"
-            if self._key_in_log(key):
-                if p.team == winner:
-                    p.xp = u256(int(p.xp) + 100)
+        for i in range(len(self.player_log)):
+            entry = self.player_log[i]
+            parts = entry.split(":")
+            if len(parts) >= 6 and parts[0] == room_id:
+                xp = int(parts[5]) if parts[5].isdigit() else 0
+                if parts[2] == winner:
+                    xp += 100
                 else:
-                    p.xp = u256(int(p.xp) + 20)
-                self.players[i] = p
+                    xp += 20
+                self.player_log[i] = f"{parts[0]}:{parts[1]}:{parts[2]}:{parts[3]}:{parts[4]}:{xp}"
 
         return (
             f"Winner: Team {winner}! "
@@ -389,37 +322,36 @@ No extra text."""
     #  INTERNAL HELPERS
     # ══════════════════════════════════════════════════════
 
-    def _find_room(self, room_id: str) -> int:
-        for i in range(len(self.rooms)):
-            if self.rooms[i].id == room_id:
-                return i
-        return -1
+    def _get_room_field(self, room_id: str, field: str) -> str:
+        key = f"{room_id}_{field}:"
+        for i in range(len(self.room_data)):
+            if self.room_data[i].startswith(key):
+                return self.room_data[i][len(key):]
+        return ""
+
+    def _set_room_field(self, room_id: str, field: str, value: str) -> None:
+        key = f"{room_id}_{field}:"
+        for i in range(len(self.room_data)):
+            if self.room_data[i].startswith(key):
+                self.room_data[i] = f"{key}{value}"
+                return
+        self.room_data.append(f"{key}{value}")
 
     def _player_in_room(self, room_id: str, addr: str) -> bool:
-        return self._key_in_log(f"{room_id}:{addr}")
-
-    def _key_in_log(self, key: str) -> bool:
-        for i in range(len(self.room_player_log)):
-            if self.room_player_log[i] == key:
+        for i in range(len(self.player_log)):
+            parts = self.player_log[i].split(":")
+            if len(parts) >= 2 and parts[0] == room_id and parts[1] == addr:
                 return True
         return False
 
     def _count_team(self, room_id: str, team: str) -> int:
         count = 0
-        for i in range(len(self.players)):
-            p = self.players[i]
-            key = f"{room_id}:{p.address}"
-            if self._key_in_log(key) and p.team == team:
+        for i in range(len(self.player_log)):
+            parts = self.player_log[i].split(":")
+            if len(parts) >= 3 and parts[0] == room_id and parts[2] == team:
                 count += 1
         return count
 
-    def _generate_room_code(self) -> str:
-        chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        code = ""
-        seed = int(self.room_counter) + 1000
-        for _ in range(6):
-            code += chars[seed % len(chars)]
-            seed = seed // len(chars) + int(self.room_counter) + 1
-        return code
+    
 
 
