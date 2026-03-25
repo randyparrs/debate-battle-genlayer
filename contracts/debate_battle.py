@@ -1,11 +1,20 @@
-# contracts/debate_battle.py
-# Debate Battle — GenLayer Intelligent Contract
-# Mini-game for GenLayer Community
+# { "Depends": "py-genlayer:test" }
 
-from genlayer import IContract, public
-from genlayer.py.types import Address
+# ============================================================
+#  Debate Battle — GenLayer Community Mini-Game
+#  Mini-games for GenLayer's Community Track
+#
+#  A multiplayer debate game where players argue opposing
+#  sides of a topic and GenLayer's Intelligent Contracts +
+#  Optimistic Democracy decide the winner.
+#
+#  Requirements met:
+#    ✅ Optimistic Democracy consensus
+#    ✅ Equivalence Principle (gl.vm.run_nondet_unsafe)
+# ============================================================
+
 import json
-import random
+from genlayer import *
 
 
 WEEKLY_TOPICS = [
@@ -22,149 +31,253 @@ WEEKLY_TOPICS = [
 ]
 
 
-class DebateBattle(IContract):
+@allow_storage
+@dataclass
+class Player:
+    address: str
+    team: str        # "A" or "B"
+    argument: str
+    submitted: bool
+    xp: u256
 
-    def __init__(self):
-        self.rooms: dict[str, dict] = {}
-        self.room_counter: int = 0
-        self.player_xp: dict[str, int] = {}
 
-    @public
-    def create_room(self, time_limit_minutes: int) -> str:
-        assert time_limit_minutes in [5, 10, 15], "Time limit must be 5, 10, or 15 minutes"
+@allow_storage
+@dataclass
+class Room:
+    id: str
+    host: str
+    topic: str
+    time_limit: u256
+    status: str      # "waiting" | "arguing" | "judging" | "finished"
+    winner_team: str
+    score_team_a: u256
+    score_team_b: u256
+    reasoning: str
+    player_count: u256
 
+
+class DebateBattle(gl.Contract):
+
+    # ── State ──────────────────────────────────────────────
+    owner: str
+    room_counter: u256
+    rooms: DynArray[Room]
+    players: DynArray[Player]
+    room_player_log: DynArray[str]   # "room_id:player_address" flat list
+
+    # ── Constructor ────────────────────────────────────────
+    def __init__(self, owner_address: str):
+        self.owner = owner_address
+        self.room_counter = u256(0)
+
+    # ══════════════════════════════════════════════════════
+    #  READ FUNCTIONS
+    # ══════════════════════════════════════════════════════
+
+    @gl.public.view
+    def get_weekly_topic(self) -> str:
+        index = int(self.room_counter) % len(WEEKLY_TOPICS)
+        return WEEKLY_TOPICS[index]
+
+    @gl.public.view
+    def get_room_count(self) -> u256:
+        return self.room_counter
+
+    @gl.public.view
+    def get_room(self, room_id: str) -> str:
+        for i in range(len(self.rooms)):
+            r = self.rooms[i]
+            if r.id == room_id:
+                return (
+                    f"Room: {r.id} | "
+                    f"Topic: {r.topic} | "
+                    f"Status: {r.status} | "
+                    f"Players: {int(r.player_count)} | "
+                    f"Winner: {r.winner_team} | "
+                    f"Score A: {int(r.score_team_a)} | "
+                    f"Score B: {int(r.score_team_b)} | "
+                    f"Reasoning: {r.reasoning}"
+                )
+        return "Room not found"
+
+    @gl.public.view
+    def get_player_xp(self, player_address: str) -> u256:
+        for i in range(len(self.players)):
+            p = self.players[i]
+            if p.address == player_address:
+                return p.xp
+        return u256(0)
+
+    @gl.public.view
+    def get_game_summary(self) -> str:
+        return (
+            f"=== Debate Battle DAO ===\n"
+            f"Total Rooms: {int(self.room_counter)}\n"
+            f"Total Players: {len(self.players)}\n"
+            f"Current Topic: {self.get_weekly_topic()}"
+        )
+
+    # ══════════════════════════════════════════════════════
+    #  CREATE ROOM
+    # ══════════════════════════════════════════════════════
+
+    @gl.public.write
+    def create_room(self, time_limit_minutes: u256) -> str:
+        assert int(time_limit_minutes) in [5, 10, 15], "Time limit must be 5, 10, or 15"
+
+        caller = str(gl.message.sender_address)
         room_id = self._generate_room_code()
-        caller = str(self.contract_runner.from_address)
+        index = int(self.room_counter) % len(WEEKLY_TOPICS)
+        topic = WEEKLY_TOPICS[index]
 
-        topic_index = self.room_counter % len(WEEKLY_TOPICS)
-        topic = WEEKLY_TOPICS[topic_index]
+        room = Room(
+            id=room_id,
+            host=caller,
+            topic=topic,
+            time_limit=time_limit_minutes,
+            status="waiting",
+            winner_team="",
+            score_team_a=u256(0),
+            score_team_b=u256(0),
+            reasoning="",
+            player_count=u256(0),
+        )
+        self.rooms.append(room)
+        self.room_counter = u256(int(self.room_counter) + 1)
+        return f"Room {room_id} created! Topic: {topic}"
 
-        self.rooms[room_id] = {
-            "host": caller,
-            "topic": topic,
-            "topic_index": topic_index,
-            "time_limit": time_limit_minutes,
-            "players": {},
-            "team_a_players": [],
-            "team_b_players": [],
-            "status": "waiting",
-            "winner_team": None,
-            "best_argument_player": None,
-            "judgment_reasoning": None,
-            "created_at": self.room_counter,
-        }
+    # ══════════════════════════════════════════════════════
+    #  JOIN ROOM
+    # ══════════════════════════════════════════════════════
 
-        self.room_counter += 1
-        return room_id
-
-    @public
+    @gl.public.write
     def join_room(self, room_id: str) -> str:
-        assert room_id in self.rooms, "Room not found"
-        room = self.rooms[room_id]
-        assert room["status"] == "waiting", "Room is no longer accepting players"
-        assert len(room["players"]) < 8, "Room is full (max 8 players)"
+        caller = str(gl.message.sender_address)
+        room_idx = self._find_room(room_id)
+        assert room_idx >= 0, "Room not found"
 
-        caller = str(self.contract_runner.from_address)
-        assert caller not in room["players"], "You have already joined this room"
+        r = self.rooms[room_idx]
+        assert r.status == "waiting", "Room is not accepting players"
+        assert int(r.player_count) < 8, "Room is full (max 8 players)"
+        assert not self._player_in_room(room_id, caller), "Already joined"
 
-        team_a_count = len(room["team_a_players"])
-        team_b_count = len(room["team_b_players"])
+        # Assign team for balance
+        team_a = self._count_team(room_id, "A")
+        team_b = self._count_team(room_id, "B")
+        team = "A" if team_a <= team_b else "B"
 
-        if team_a_count < team_b_count:
-            team = "A"
-        elif team_b_count < team_a_count:
-            team = "B"
-        else:
-            team = "A" if (hash(caller) % 2 == 0) else "B"
+        player = Player(
+            address=caller,
+            team=team,
+            argument="",
+            submitted=False,
+            xp=u256(0),
+        )
+        self.players.append(player)
+        self.room_player_log.append(f"{room_id}:{caller}")
 
-        room["players"][caller] = {
-            "team": team,
-            "argument": None,
-            "submitted": False,
-        }
+        r.player_count = u256(int(r.player_count) + 1)
+        self.rooms[room_idx] = r
 
-        if team == "A":
-            room["team_a_players"].append(caller)
-        else:
-            room["team_b_players"].append(caller)
+        return f"Joined room {room_id} on Team {team}! Topic: {r.topic}"
 
-        return f"Joined room {room_id} on Team {team}. Topic: {room['topic']}"
+    # ══════════════════════════════════════════════════════
+    #  START DEBATE
+    # ══════════════════════════════════════════════════════
 
-    @public
+    @gl.public.write
     def start_debate(self, room_id: str) -> str:
-        assert room_id in self.rooms, "Room not found"
-        room = self.rooms[room_id]
-        caller = str(self.contract_runner.from_address)
+        caller = str(gl.message.sender_address)
+        room_idx = self._find_room(room_id)
+        assert room_idx >= 0, "Room not found"
 
-        assert caller == room["host"], "Only the host can start the debate"
-        assert room["status"] == "waiting", "Debate already started"
-        assert len(room["team_a_players"]) >= 1, "Need at least 1 player on each team"
-        assert len(room["team_b_players"]) >= 1, "Need at least 1 player on each team"
+        r = self.rooms[room_idx]
+        assert caller == r.host, "Only the host can start"
+        assert r.status == "waiting", "Debate already started"
+        assert self._count_team(room_id, "A") >= 1, "Need at least 1 player on Team A"
+        assert self._count_team(room_id, "B") >= 1, "Need at least 1 player on Team B"
 
-        room["status"] = "arguing"
-        return f"Debate started! Topic: {room['topic']}. You have {room['time_limit']} minutes."
+        r.status = "arguing"
+        self.rooms[room_idx] = r
+        return f"Debate started! Topic: {r.topic}. You have {int(r.time_limit)} minutes!"
 
-    @public
+    # ══════════════════════════════════════════════════════
+    #  SUBMIT ARGUMENT
+    # ══════════════════════════════════════════════════════
+
+    @gl.public.write
     def submit_argument(self, room_id: str, argument: str) -> str:
-        assert room_id in self.rooms, "Room not found"
-        room = self.rooms[room_id]
-        caller = str(self.contract_runner.from_address)
+        caller = str(gl.message.sender_address)
+        room_idx = self._find_room(room_id)
+        assert room_idx >= 0, "Room not found"
 
-        assert room["status"] == "arguing", "Debate is not in arguing phase"
-        assert caller in room["players"], "You are not in this room"
-        assert not room["players"][caller]["submitted"], "You already submitted an argument"
-        assert 50 <= len(argument) <= 500, "Argument must be between 50 and 500 characters"
+        r = self.rooms[room_idx]
+        assert r.status == "arguing", "Debate not in arguing phase"
+        assert self._player_in_room(room_id, caller), "You are not in this room"
+        assert 10 <= len(argument) <= 500, "Argument must be 10-500 characters"
 
-        room["players"][caller]["argument"] = argument
-        room["players"][caller]["submitted"] = True
+        # Update player argument
+        for i in range(len(self.players)):
+            p = self.players[i]
+            key = f"{room_id}:{p.address}"
+            if p.address == caller and self._key_in_log(key):
+                assert not p.submitted, "Already submitted"
+                p.argument = argument
+                p.submitted = True
+                self.players[i] = p
+                break
 
-        submitted_count = sum(1 for p in room["players"].values() if p["submitted"])
-        total_players = len(room["players"])
+        return f"Argument submitted for room {room_id}!"
 
-        return f"Argument submitted! ({submitted_count}/{total_players} players submitted)"
+    # ══════════════════════════════════════════════════════
+    #  JUDGE DEBATE — uses Equivalence Principle ✅
+    # ══════════════════════════════════════════════════════
 
-    @public
+    @gl.public.write
     def judge_debate(self, room_id: str) -> str:
-        assert room_id in self.rooms, "Room not found"
-        room = self.rooms[room_id]
-        caller = str(self.contract_runner.from_address)
+        caller = str(gl.message.sender_address)
+        room_idx = self._find_room(room_id)
+        assert room_idx >= 0, "Room not found"
 
-        assert caller in room["players"] or caller == room["host"], "You are not in this room"
-        assert room["status"] == "arguing", "Debate is not in arguing phase"
+        r = self.rooms[room_idx]
+        assert r.status == "arguing", "Debate not in arguing phase"
 
-        room["status"] = "judging"
+        topic = r.topic
 
-        search_query = room["topic"].replace(" ", "+")
-        context_url = f"https://en.wikipedia.org/w/index.php?search={search_query}&ns0=1"
-
-        try:
-            web_context = get_webpage(context_url, mode="text")
-            web_context = web_context[:2000]
-        except Exception:
-            web_context = "No additional context available. Judge based on argument quality alone."
-
-        team_a_arguments = []
-        team_b_arguments = []
-
-        for player_addr, player_data in room["players"].items():
-            if player_data["submitted"] and player_data["argument"]:
-                entry = f"Player {player_addr[:8]}...: {player_data['argument']}"
-                if player_data["team"] == "A":
-                    team_a_arguments.append(entry)
+        # Collect arguments per team
+        team_a_args = []
+        team_b_args = []
+        for i in range(len(self.players)):
+            p = self.players[i]
+            key = f"{room_id}:{p.address}"
+            if self._key_in_log(key) and p.submitted and p.argument:
+                entry = f"Player {p.address[:8]}...: {p.argument}"
+                if p.team == "A":
+                    team_a_args.append(entry)
                 else:
-                    team_b_arguments.append(entry)
+                    team_b_args.append(entry)
 
-        assert len(team_a_arguments) > 0 or len(team_b_arguments) > 0, "No arguments submitted yet"
+        assert len(team_a_args) > 0 or len(team_b_args) > 0, "No arguments submitted"
 
-        team_a_text = "\n".join(team_a_arguments) if team_a_arguments else "No arguments submitted"
-        team_b_text = "\n".join(team_b_arguments) if team_b_arguments else "No arguments submitted"
+        team_a_text = "\n".join(team_a_args) if team_a_args else "No arguments submitted"
+        team_b_text = "\n".join(team_b_args) if team_b_args else "No arguments submitted"
 
-        prompt = f"""
-You are an impartial debate judge for a community game on GenLayer blockchain.
+        # ── Equivalence Principle: leader + validator ✅ ──
 
-DEBATE TOPIC: "{room['topic']}"
+        def leader_fn():
+            # Fetch web context for the topic
+            search_url = f"https://en.wikipedia.org/wiki/{topic.replace(' ', '_')}"
+            try:
+                response = gl.nondet.web.get(search_url)
+                web_context = response.body.decode("utf-8")[:2000]
+            except Exception:
+                web_context = "No additional context available."
 
-BACKGROUND CONTEXT (from the web):
+            prompt = f"""You are an impartial debate judge for a community game on GenLayer blockchain.
+
+DEBATE TOPIC: "{topic}"
+
+BACKGROUND CONTEXT:
 {web_context}
 
 TEAM A ARGUMENTS (arguing FOR the topic):
@@ -174,110 +287,139 @@ TEAM B ARGUMENTS (arguing AGAINST the topic):
 {team_b_text}
 
 JUDGING CRITERIA:
-1. Logical coherence — does the argument make sense?
-2. Use of evidence or examples — are claims supported?
-3. Persuasiveness — would a neutral observer be convinced?
-4. Relevance — does it directly address the topic?
+1. Logical coherence
+2. Use of evidence or examples
+3. Persuasiveness
+4. Relevance to the topic
 
-YOUR TASK:
-Evaluate all arguments and determine which team collectively argued more convincingly.
-Also identify the single best argument across all players.
-
-Respond ONLY with a valid JSON object in this exact format:
+Respond ONLY with a JSON object:
 {{
-  "winner_team": "<A or B>",
-  "best_argument_player": "<player address starting with 0x, or null if none stood out>",
-  "score_team_a": <integer 0-100>,
-  "score_team_b": <integer 0-100>,
-  "reasoning": "<2-3 sentences explaining your verdict>",
-  "team_a_feedback": "<one sentence of constructive feedback for Team A>",
-  "team_b_feedback": "<one sentence of constructive feedback for Team B>"
+  "winner_team": "A",
+  "score_team_a": 75,
+  "score_team_b": 60,
+  "reasoning": "two sentences explaining the verdict"
 }}
 
-EQUIVALENCE NOTE FOR VALIDATORS: Two judgments are equivalent if they identify
-the same winner_team. Differences in score values of up to 10 points and
-differences in reasoning wording are acceptable — only the winner_team must match.
-If one team submitted no arguments, the other team wins automatically.
-"""
+Rules:
+- winner_team: exactly "A" or "B"
+- scores: integers 0-100
+- reasoning: two sentences max
+- If a team has no arguments, the other team wins automatically
+No extra text."""
 
-        result_text = call_llm(prompt)
+            result = gl.nondet.exec_prompt(prompt)
+            clean = result.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(clean)
 
-        try:
-            clean = result_text.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            result = json.loads(clean.strip())
-        except json.JSONDecodeError:
-            raise Exception(f"LLM returned invalid JSON: {result_text[:200]}")
+            winner = data.get("winner_team", "A")
+            score_a = int(data.get("score_team_a", 50))
+            score_b = int(data.get("score_team_b", 50))
+            reasoning = data.get("reasoning", "")
 
-        winner_team = result.get("winner_team", "A")
-        best_player = result.get("best_argument_player")
-        reasoning = result.get("reasoning", "No reasoning provided")
-        score_a = result.get("score_team_a", 50)
-        score_b = result.get("score_team_b", 50)
-        feedback_a = result.get("team_a_feedback", "")
-        feedback_b = result.get("team_b_feedback", "")
+            if winner not in ("A", "B"):
+                winner = "A"
+            score_a = max(0, min(100, score_a))
+            score_b = max(0, min(100, score_b))
 
-        for player_addr, player_data in room["players"].items():
-            if player_addr not in self.player_xp:
-                self.player_xp[player_addr] = 0
+            return json.dumps({
+                "winner_team": winner,
+                "score_team_a": score_a,
+                "score_team_b": score_b,
+                "reasoning": reasoning
+            }, sort_keys=True)
 
-            if player_data["team"] == winner_team:
-                self.player_xp[player_addr] += 100
-            else:
-                self.player_xp[player_addr] += 20
+        def validator_fn(leader_result) -> bool:
+            """
+            Validators independently judge the debate.
+            Equivalent if: same winner_team + scores within ±10 ✅
+            """
+            if not isinstance(leader_result, gl.vm.Return):
+                return False
+            try:
+                validator_raw = leader_fn()
+                leader_data = json.loads(leader_result.calldata)
+                validator_data = json.loads(validator_raw)
 
-        if best_player and best_player in self.player_xp:
-            self.player_xp[best_player] += 50
+                # Winner must match exactly
+                if leader_data["winner_team"] != validator_data["winner_team"]:
+                    return False
+                # Scores within ±10 points
+                if abs(leader_data["score_team_a"] - validator_data["score_team_a"]) > 10:
+                    return False
+                if abs(leader_data["score_team_b"] - validator_data["score_team_b"]) > 10:
+                    return False
+                return True
+            except Exception:
+                return False
 
-        room["status"] = "finished"
-        room["winner_team"] = winner_team
-        room["best_argument_player"] = best_player
-        room["judgment_reasoning"] = reasoning
-        room["score_team_a"] = score_a
-        room["score_team_b"] = score_b
-        room["feedback_team_a"] = feedback_a
-        room["feedback_team_b"] = feedback_b
+        raw = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        data = json.loads(raw)
+
+        winner = data["winner_team"]
+        score_a = data["score_team_a"]
+        score_b = data["score_team_b"]
+        reasoning = data["reasoning"]
+
+        # Update room
+        r.status = "finished"
+        r.winner_team = winner
+        r.score_team_a = u256(score_a)
+        r.score_team_b = u256(score_b)
+        r.reasoning = reasoning
+        self.rooms[room_idx] = r
+
+        # Award XP
+        for i in range(len(self.players)):
+            p = self.players[i]
+            key = f"{room_id}:{p.address}"
+            if self._key_in_log(key):
+                if p.team == winner:
+                    p.xp = u256(int(p.xp) + 100)
+                else:
+                    p.xp = u256(int(p.xp) + 20)
+                self.players[i] = p
 
         return (
-            f"Debate judged! Winner: Team {winner_team}. "
-            f"Scores — Team A: {score_a}/100, Team B: {score_b}/100. "
-            f"Reasoning: {reasoning}"
+            f"Winner: Team {winner}! "
+            f"Score A: {score_a}/100, Score B: {score_b}/100. "
+            f"{reasoning}"
         )
 
-    @public
-    def get_room(self, room_id: str) -> dict:
-        assert room_id in self.rooms, "Room not found"
-        return self.rooms[room_id]
+    # ══════════════════════════════════════════════════════
+    #  INTERNAL HELPERS
+    # ══════════════════════════════════════════════════════
 
-    @public
-    def get_leaderboard(self) -> list:
-        sorted_players = sorted(
-            self.player_xp.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )
-        return [
-            {"rank": i + 1, "player": addr, "xp": xp}
-            for i, (addr, xp) in enumerate(sorted_players[:10])
-        ]
+    def _find_room(self, room_id: str) -> int:
+        for i in range(len(self.rooms)):
+            if self.rooms[i].id == room_id:
+                return i
+        return -1
 
-    @public
-    def get_player_xp(self, player_address: str) -> int:
-        return self.player_xp.get(player_address, 0)
+    def _player_in_room(self, room_id: str, addr: str) -> bool:
+        return self._key_in_log(f"{room_id}:{addr}")
 
-    @public
-    def get_weekly_topic(self) -> str:
-        index = self.room_counter % len(WEEKLY_TOPICS)
-        return WEEKLY_TOPICS[index]
+    def _key_in_log(self, key: str) -> bool:
+        for i in range(len(self.room_player_log)):
+            if self.room_player_log[i] == key:
+                return True
+        return False
+
+    def _count_team(self, room_id: str, team: str) -> int:
+        count = 0
+        for i in range(len(self.players)):
+            p = self.players[i]
+            key = f"{room_id}:{p.address}"
+            if self._key_in_log(key) and p.team == team:
+                count += 1
+        return count
 
     def _generate_room_code(self) -> str:
         chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         code = ""
-        seed = self.room_counter + 1000
+        seed = int(self.room_counter) + 1000
         for _ in range(6):
             code += chars[seed % len(chars)]
-            seed = seed // len(chars) + self.room_counter
+            seed = seed // len(chars) + int(self.room_counter) + 1
         return code
+
+
