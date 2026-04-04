@@ -1,171 +1,130 @@
-# ⚔️ Debate Battle — A GenLayer Community Mini-Game
+# Debate Battle  A GenLayer Community Mini-Game
 
-> A multiplayer debate game where players argue opposing sides of a topic and **GenLayer's Intelligent Contracts + Optimistic Democracy** decide the winner — no human judge, no bias, just AI consensus.
-
-![GenLayer](https://img.shields.io/badge/GenLayer-Intelligent%20Contract-00c896?style=for-the-badge)
-![Type](https://img.shields.io/badge/Type-Mini--Game-orange?style=for-the-badge)
-![Players](https://img.shields.io/badge/Players-2--8-blue?style=for-the-badge)
-![Duration](https://img.shields.io/badge/Duration-5--15%20min-purple?style=for-the-badge)
+A multiplayer debate game where players argue opposing sides of a topic and GenLayer Intelligent Contracts plus Optimistic Democracy decide the winner. No human judge, no bias, just AI consensus.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-1. [What Is Debate Battle?](#what-is-debate-battle)
-2. [How GenLayer Powers the Game](#how-genlayer-powers-the-game)
-3. [Game Rules](#game-rules)
-4. [Project Architecture](#project-architecture)
-5. [Part 1 — The Intelligent Contract](#part-1--the-intelligent-contract)
-6. [Part 2 — Running in GenLayer Studio](#part-2--running-in-genlayer-studio)
-7. [Leaderboard and XP System](#leaderboard-and-xp-system)
-8. [Project Structure](#project-structure)
-9. [Resources](#resources)
+1. What Is Debate Battle
+2. How GenLayer Powers the Game
+3. Game Rules
+4. Project Architecture
+5. Part 1 The Intelligent Contract
+6. Part 2 Running in GenLayer Studio
+7. Leaderboard and XP System
+8. Project Structure
+9. Resources
 
 ---
 
-## What Is Debate Battle?
+## What Is Debate Battle
 
-Debate Battle is a community mini-game built on GenLayer where:
-
-- Players are split into **Team A** (FOR a topic) and **Team B** (AGAINST a topic)
-- Each player submits a text argument defending their position
-- A **GenLayer Intelligent Contract** fetches real web context and uses an LLM to judge the debate
-- **Optimistic Democracy consensus** ensures the verdict is fair — multiple validators independently evaluate and must agree
-- Winners earn **XP points** tracked on-chain
+Debate Battle is a community mini-game built on GenLayer where players are split into Team A arguing for a topic and Team B arguing against it. Each player submits a text argument defending their position. A GenLayer Intelligent Contract fetches real web context and uses an LLM to judge the debate. Optimistic Democracy consensus ensures the verdict is fair because multiple validators independently evaluate and must agree. Winners earn XP points tracked on-chain.
 
 ---
 
 ## How GenLayer Powers the Game
 
-### Optimistic Democracy ✅
-Multiple validators independently evaluate the debate arguments. A transaction is only finalized when validators reach consensus — ensuring no single node can manipulate the outcome.
+### Optimistic Democracy
 
-### Equivalence Principle ✅
-The `judge_debate` function uses `gl.vm.run_nondet_unsafe(leader_fn, validator_fn)`:
-- **Leader** fetches web context + calls LLM to determine the winner
-- **Validator** independently re-runs the same process
-- Results are equivalent if: `winner_team` matches exactly AND scores are within ±10 points
+Multiple validators independently evaluate the debate arguments. A transaction is only finalized when validators reach consensus, ensuring no single node can manipulate the outcome.
+
+### Equivalence Principle
+
+The judge_debate function uses gl.vm.run_nondet_unsafe with a leader function and a validator function. The leader fetches web context and calls the LLM to determine the winner. The validator independently re-runs the same process. Results are equivalent if winner_team matches exactly and scores are within plus or minus 10 points.
 
 ### Web Data Access
-The contract fetches Wikipedia context about the debate topic in real time to give the AI judge background knowledge before evaluating arguments.
+
+The contract fetches Wikipedia context about the debate topic in real time to give the AI judge background knowledge before evaluating the arguments.
 
 ---
 
 ## Game Rules
 
-1. Host creates a room with a time limit (5, 10, or 15 minutes)
-2. Players join and are automatically assigned to Team A or Team B
-3. Host starts the debate
-4. Each player submits one argument (10–500 characters)
-5. Anyone calls `judge_debate` to trigger the AI verdict
-6. Winners receive **100 XP**, losers receive **20 XP**
+The host creates a room with a time limit of 5, 10, or 15 minutes. Players join and are automatically assigned to Team A or Team B. The host starts the debate. Each player submits one argument between 10 and 500 characters. Anyone can call judge_debate to trigger the AI verdict. Winners receive 100 XP and losers receive 20 XP.
 
 ### Weekly Topics
-The contract cycles through 10 curated debate topics:
-- Bitcoin is better than Ethereum as a long-term store of value
-- AI will create more jobs than it destroys in the next decade
-- Decentralization is more important than user experience in Web3
-- Layer 2 solutions are the future of blockchain scalability
-- DAOs will replace traditional corporations within 20 years
-- And more...
+
+The contract cycles through 10 curated debate topics including Bitcoin is better than Ethereum as a long-term store of value, AI will create more jobs than it destroys in the next decade, Decentralization is more important than user experience in Web3, Layer 2 solutions are the future of blockchain scalability, and DAOs will replace traditional corporations within 20 years.
 
 ---
 
 ## Project Architecture
 
-```
-Player A ──┐
-Player B ──┤──► DebateBattle Contract ──► gl.nondet.web.get (Wikipedia)
-Player C ──┘         │                         │
-                      │                         ▼
-                      │                    gl.nondet.exec_prompt (LLM Judge)
-                      │                         │
-                      ▼                         ▼
-              Optimistic Democracy ◄── gl.vm.run_nondet_unsafe
-              (5 validators agree)              │
-                      │                         ▼
-                      └──────────► Winner + XP awarded on-chain
-```
+Players submit arguments to the DebateBattle Contract which fetches context from Wikipedia using gl.nondet.web.get and then calls the LLM judge using gl.nondet.exec_prompt. The result goes through gl.vm.run_nondet_unsafe where five validators must agree through Optimistic Democracy before the winner and XP are awarded on-chain.
 
 ---
 
-## Part 1 — The Intelligent Contract
+## Part 1 The Intelligent Contract
 
-The core of the game is `contracts/debate_battle.py` — an Intelligent Contract built with the current GenLayer Python SDK.
+The core of the game is contracts/debate_battle.py built with the current GenLayer Python SDK.
 
 ### Key Functions
 
-| Function | Type | Description |
-|----------|------|-------------|
-| `create_room` | write | Create a new debate room |
-| `join_room` | write | Join an existing room |
-| `start_debate` | write | Host starts the debate |
-| `submit_argument` | write | Submit your argument |
-| `judge_debate` | write | Trigger AI judgment ✅ |
-| `get_room_status` | view | Check room state |
-| `get_player_xp` | view | Check player XP |
-| `get_weekly_topic` | view | Get current topic |
-| `get_game_summary` | view | Overall stats |
+create_room is a write function that creates a new debate room.
+
+join_room is a write function that joins an existing room.
+
+start_debate is a write function that the host uses to start the debate.
+
+submit_argument is a write function for submitting your argument.
+
+judge_debate is a write function that triggers the AI judgment.
+
+get_room_status is a view function that checks the room state.
+
+get_player_xp is a view function that checks player XP.
+
+get_weekly_topic is a view function that returns the current topic.
+
+get_game_summary is a view function that shows overall stats.
 
 ### Equivalence Principle Implementation
 
 ```python
 def leader_fn():
-    # Fetch Wikipedia context for the topic
     response = gl.nondet.web.get(wikipedia_url)
     web_context = response.body.decode("utf-8")[:2000]
-    # LLM judges the debate
     result = gl.nondet.exec_prompt(prompt)
-    return json.dumps({"winner_team": "A", "score_team_a": 75, ...}, sort_keys=True)
+    return json.dumps({"winner_team": "A", "score_team_a": 75}, sort_keys=True)
 
 def validator_fn(leader_result) -> bool:
     if not isinstance(leader_result, gl.vm.Return):
         return False
-    validator_raw = leader_fn()  # Re-run independently
-    # winner_team must match exactly
-    # scores within ±10 points
+    validator_raw = leader_fn()
     return leader_data["winner_team"] == validator_data["winner_team"]
 
-result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)  # ✅
+result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 ```
 
 ---
 
-## Part 2 — Running in GenLayer Studio
+## Part 2 Running in GenLayer Studio
 
-### Deploy the Contract
-
-1. Go to [GenLayer Studio](https://studio.genlayer.com)
-2. Create a new file `debate_battle.py`
-3. Paste the contract code from `contracts/debate_battle.py`
-4. Set Execution Mode to **Normal (Full Consensus)**
-5. Deploy with your Studio address as `owner_address`
+Go to GenLayer Studio at https://studio.genlayer.com and create a new file called debate_battle.py. Paste the contract code from contracts/debate_battle.py. Set execution mode to Normal Full Consensus. Deploy with your Studio address as owner_address.
 
 ### Play a Full Game
 
-```
-Step 1: create_room        → time_limit_minutes: 5
-Step 2: join_room          → room_id: ROOM0
-Step 3: start_debate       → room_id: ROOM0
-Step 4: submit_argument    → room_id: ROOM0
-                             argument: "Your argument here (10-500 chars)"
-Step 5: judge_debate       → room_id: ROOM0  ← AI judges here ✅
-Step 6: get_room_status    → room_id: ROOM0  ← See the verdict
-Step 7: get_player_xp      → player_address: 0xYourAddress
-```
+Step 1: create_room with time_limit_minutes set to 5
+
+Step 2: join_room with the room_id that was returned
+
+Step 3: start_debate with the same room_id
+
+Step 4: submit_argument with the room_id and your argument text between 10 and 500 characters
+
+Step 5: judge_debate with the room_id to trigger the AI verdict
+
+Step 6: get_room_status with the room_id to see the result
+
+Step 7: get_player_xp with your address to check your XP
 
 ---
 
 ## Leaderboard and XP System
 
-XP is tracked on-chain per player address:
-
-| Result | XP Earned |
-|--------|-----------|
-| Winning team | +100 XP |
-| Losing team | +20 XP |
-
-Use `get_player_xp` with any player address to check their accumulated XP across all debates.
+XP is tracked on-chain per player address. The winning team earns 100 XP per debate and the losing team earns 20 XP. Use get_player_xp with any player address to check their accumulated XP across all debates.
 
 ---
 
@@ -174,7 +133,7 @@ Use `get_player_xp` with any player address to check their accumulated XP across
 ```
 debate-battle-genlayer/
 ├── contracts/
-│   └── debate_battle.py      ← Intelligent Contract (GenLayer Studio)
+│   └── debate_battle.py
 └── README.md
 ```
 
@@ -182,16 +141,21 @@ debate-battle-genlayer/
 
 ## Resources
 
-- [GenLayer Docs](https://docs.genlayer.com)
-- [Optimistic Democracy](https://docs.genlayer.com/understand-genlayer-protocol/core-concepts/optimistic-democracy)
-- [Equivalence Principle](https://docs.genlayer.com/understand-genlayer-protocol/core-concepts/optimistic-democracy/equivalence-principle)
-- [GenLayer Studio](https://studio.genlayer.com)
-- [Discord](https://discord.gg/8Jm4v89VAu)
-- [X (Twitter)](https://x.com/GenLayer)
+GenLayer Docs: https://docs.genlayer.com
+
+Optimistic Democracy: https://docs.genlayer.com/understand-genlayer-protocol/core-concepts/optimistic-democracy
+
+Equivalence Principle: https://docs.genlayer.com/understand-genlayer-protocol/core-concepts/optimistic-democracy/equivalence-principle
+
+GenLayer Studio: https://studio.genlayer.com
+
+Discord: https://discord.gg/8Jm4v89VAu
+
+X Twitter: https://x.com/GenLayer
 
 ---
 
-*Built for the GenLayer Hackathon — Mini-games for GenLayer's Community track.* 
+Built for the GenLayer Hackathon, Mini-games for GenLayer Community track.
 
          
 
