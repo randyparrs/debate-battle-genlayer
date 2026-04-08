@@ -1,18 +1,5 @@
 # { "Depends": "py-genlayer:test" }
 
-# ============================================================
-#  Debate Battle — GenLayer Community Mini-Game
-#  Mini-games for GenLayer's Community Track
-#
-#  A multiplayer debate game where players argue opposing
-#  sides of a topic and GenLayer's Intelligent Contracts +
-#  Optimistic Democracy decide the winner.
-#
-#  Requirements met:
-#    ✅ Optimistic Democracy consensus
-#    ✅ Equivalence Principle (gl.vm.run_nondet_unsafe)
-# ============================================================
-
 import json
 from genlayer import *
 
@@ -33,26 +20,20 @@ WEEKLY_TOPICS = [
 
 class DebateBattle(gl.Contract):
 
-    # ── State ──────────────────────────────────────────────
-    owner: str
-    room_counter: u256
-
     # Room data stored as flat strings "field:value"
     # room_{id}_host, room_{id}_topic, room_{id}_status,
     # room_{id}_score_a, room_{id}_score_b, room_{id}_reasoning
-    room_data: DynArray[str]
-
+    #
     # Player data: "room_id:address:team:submitted:argument:xp"
+
+    owner: Address
+    room_counter: u256
+    room_data: DynArray[str]
     player_log: DynArray[str]
 
-    # ── Constructor ────────────────────────────────────────
-    def __init__(self, owner_address: str):
+    def __init__(self, owner_address: Address):
         self.owner = owner_address
         self.room_counter = u256(0)
-
-    # ══════════════════════════════════════════════════════
-    #  READ FUNCTIONS
-    # ══════════════════════════════════════════════════════
 
     @gl.public.view
     def get_weekly_topic(self) -> str:
@@ -95,14 +76,10 @@ class DebateBattle(gl.Contract):
     @gl.public.view
     def get_game_summary(self) -> str:
         return (
-            f"=== Debate Battle ===\n"
+            f"Debate Battle\n"
             f"Total Rooms: {int(self.room_counter)}\n"
             f"Current Topic: {self.get_weekly_topic()}"
         )
-
-    # ══════════════════════════════════════════════════════
-    #  CREATE ROOM
-    # ══════════════════════════════════════════════════════
 
     @gl.public.write
     def create_room(self, time_limit_minutes: u256) -> str:
@@ -125,10 +102,6 @@ class DebateBattle(gl.Contract):
         self.room_counter = u256(int(self.room_counter) + 1)
         return f"Room {room_id} created! Topic: {topic}"
 
-    # ══════════════════════════════════════════════════════
-    #  JOIN ROOM
-    # ══════════════════════════════════════════════════════
-
     @gl.public.write
     def join_room(self, room_id: str) -> str:
         caller = str(gl.message.sender_address)
@@ -140,15 +113,10 @@ class DebateBattle(gl.Contract):
         team_b = self._count_team(room_id, "B")
         team = "A" if team_a <= team_b else "B"
 
-        # "room_id:address:team:submitted:argument:xp"
         self.player_log.append(f"{room_id}:{caller}:{team}:false::0")
 
         topic = self._get_room_field(room_id, "topic")
         return f"Joined {room_id} on Team {team}! Topic: {topic}"
-
-    # ══════════════════════════════════════════════════════
-    #  START DEBATE
-    # ══════════════════════════════════════════════════════
 
     @gl.public.write
     def start_debate(self, room_id: str) -> str:
@@ -163,10 +131,6 @@ class DebateBattle(gl.Contract):
         time_limit = self._get_room_field(room_id, "time_limit")
         return f"Debate started! Topic: {topic}. You have {time_limit} minutes!"
 
-    # ══════════════════════════════════════════════════════
-    #  SUBMIT ARGUMENT
-    # ══════════════════════════════════════════════════════
-
     @gl.public.write
     def submit_argument(self, room_id: str, argument: str) -> str:
         caller = str(gl.message.sender_address)
@@ -179,15 +143,10 @@ class DebateBattle(gl.Contract):
             parts = entry.split(":")
             if len(parts) >= 6 and parts[0] == room_id and parts[1] == caller:
                 assert parts[3] == "false", "Already submitted"
-                # "room_id:address:team:submitted:argument:xp"
                 safe_arg = argument.replace(":", "-")
                 self.player_log[i] = f"{room_id}:{caller}:{parts[2]}:true:{safe_arg}:{parts[5]}"
                 return f"Argument submitted for {room_id}!"
         return "Player not found"
-
-    # ══════════════════════════════════════════════════════
-    #  JUDGE DEBATE — Equivalence Principle ✅
-    # ══════════════════════════════════════════════════════
 
     @gl.public.write
     def judge_debate(self, room_id: str) -> str:
@@ -266,10 +225,6 @@ No extra text."""
             }, sort_keys=True)
 
         def validator_fn(leader_result) -> bool:
-            """
-            Winner must match exactly.
-            Scores within ±10 points. ✅
-            """
             if not isinstance(leader_result, gl.vm.Return):
                 return False
             try:
@@ -300,7 +255,6 @@ No extra text."""
         self._set_room_field(room_id, "score_b", str(score_b))
         self._set_room_field(room_id, "reasoning", reasoning)
 
-        # Award XP
         for i in range(len(self.player_log)):
             entry = self.player_log[i]
             parts = entry.split(":")
@@ -317,10 +271,6 @@ No extra text."""
             f"Score A: {score_a}/100, Score B: {score_b}/100. "
             f"{reasoning}"
         )
-
-    # ══════════════════════════════════════════════════════
-    #  INTERNAL HELPERS
-    # ══════════════════════════════════════════════════════
 
     def _get_room_field(self, room_id: str, field: str) -> str:
         key = f"{room_id}_{field}:"
@@ -353,5 +303,3 @@ No extra text."""
         return count
 
     
-
-
