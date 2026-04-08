@@ -153,9 +153,6 @@ Discord: https://discord.gg/8Jm4v89VAu
 
 X Twitter: https://x.com/GenLayer
 
----
-
-Built for the GenLayer Hackathon, Mini-games for GenLayer Community track.
 
          
 
