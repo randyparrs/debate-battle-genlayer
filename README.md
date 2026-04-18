@@ -120,6 +120,8 @@ Step 6: get_room_status with the room_id to see the result
 
 Step 7: get_player_xp with your address to check your XP
 
+Note: the contract in this repository uses the Address type in the constructor as required by genvm-lint. When deploying in GenLayer Studio use a version that receives str in the constructor and converts internally with Address(owner_address) since Studio requires primitive types to parse the contract schema correctly.
+
 ---
 
 ## Leaderboard and XP System
